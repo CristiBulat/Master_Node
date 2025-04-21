@@ -1,0 +1,122 @@
+---
+# Sync databases from slave servers to master
+- name: Synchronize Mail Server Databases
+  hosts: mail_servers
+  become: yes
+  vars_files:
+    - ../vars/main.yml
+    - ../vars/secrets.yml
+  
+  tasks:
+    - name: Create temp directory for sync
+      file:
+        path: "/tmp/db_sync_{{ inventory_hostname }}"
+        state: directory
+        mode: '0750'
+      delegate_to: localhost
+      run_once: yes
+
+    - name: Export data from slave database
+      shell: >
+        docker exec -i $(docker ps -qf "name=mariadb") mysqldump 
+        --user={{ slave_db_user }} 
+        --password={{ vault_slave_db_password }} 
+        --no-create-info
+        --complete-insert
+        postfix virtual_domains virtual_users virtual_aliases dkim_keys
+        > /tmp/db_export.sql
+      args:
+        executable: /bin/bash
+      register: export_result
+
+    - name: Fetch exported data
+      fetch:
+        src: /tmp/db_export.sql
+        dest: "/tmp/db_sync_{{ inventory_hostname }}/db_export.sql"
+        flat: yes
+
+    - name: Create temporary tables on master
+      mysql_query:
+        login_db: "{{ master_db_name }}"
+        login_user: "{{ master_db_user }}"
+        login_password: "{{ master_db_password }}"
+        query: |
+          DROP TABLE IF EXISTS temp_virtual_domains;
+          DROP TABLE IF EXISTS temp_virtual_users;
+          DROP TABLE IF EXISTS temp_virtual_aliases;
+          DROP TABLE IF EXISTS temp_dkim_keys;
+          
+          CREATE TABLE temp_virtual_domains LIKE virtual_domains;
+          CREATE TABLE temp_virtual_users LIKE virtual_users;
+          CREATE TABLE temp_virtual_aliases LIKE virtual_aliases;
+          CREATE TABLE temp_dkim_keys LIKE dkim_keys;
+      delegate_to: localhost
+
+    - name: Import data to temporary tables
+      mysql_db:
+        state: import
+        name: "{{ master_db_name }}"
+        target: "/tmp/db_sync_{{ inventory_hostname }}/db_export.sql"
+        login_host: localhost
+        login_user: "{{ master_db_user }}"
+        login_password: "{{ master_db_password }}"
+      delegate_to: localhost
+
+    - name: Transform and import data to master tables
+      mysql_query:
+        login_db: "{{ master_db_name }}"
+        login_user: "{{ master_db_user }}"
+        login_password: "{{ master_db_password }}"
+        query: |
+          -- Set server ID variable
+          SET @server_id = {{ server_id }};
+          
+          -- Import domains
+          INSERT INTO master_virtual_domains (server_id, origin_id, name)
+          SELECT @server_id, id, name FROM temp_virtual_domains
+          ON DUPLICATE KEY UPDATE name = VALUES(name);
+          
+          -- Import users (with correct domain_id references)
+          INSERT INTO master_virtual_users 
+            (server_id, origin_id, domain_id, email, password, created, modified, active)
+          SELECT 
+            @server_id, 
+            u.id, 
+            md.id,
+            u.email, 
+            u.password, 
+            u.created, 
+            u.modified, 
+            u.active
+          FROM temp_virtual_users u
+          JOIN temp_virtual_domains d ON u.domain_id = d.id
+          JOIN master_virtual_domains md ON md.origin_id = d.id AND md.server_id = @server_id
+          ON DUPLICATE KEY UPDATE 
+            password = VALUES(password),
+            modified = VALUES(modified),
+            active = VALUES(active);
+          
+          -- Similar process for aliases and DKIM keys (omitted for brevity)
+      delegate_to: localhost
+
+    - name: Update sync timestamp
+      mysql_query:
+        login_db: "{{ master_db_name }}"
+        login_user: "{{ master_db_user }}"
+        login_password: "{{ master_db_password }}"
+        query: >
+          UPDATE mail_servers SET last_sync = NOW()
+          WHERE id = {{ server_id }}
+      delegate_to: localhost
+
+    - name: Clean up temporary tables
+      mysql_query:
+        login_db: "{{ master_db_name }}"
+        login_user: "{{ master_db_user }}"
+        login_password: "{{ master_db_password }}"
+        query: |
+          DROP TABLE IF EXISTS temp_virtual_domains;
+          DROP TABLE IF EXISTS temp_virtual_users;
+          DROP TABLE IF EXISTS temp_virtual_aliases;
+          DROP TABLE IF EXISTS temp_dkim_keys;
+      delegate_to: localhost

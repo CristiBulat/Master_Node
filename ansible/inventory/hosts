@@ -1,0 +1,14 @@
+# Inventory file for SMTP Master
+
+[mail_servers]
+# Format: hostname ansible_host=ip_address server_id=id
+# Example:
+mail1.example.com ansible_host=192.168.1.101 server_id=1
+mail2.example.org ansible_host=192.168.1.102 server_id=2
+# Add more servers as needed
+
+[master]
+localhost ansible_connection=local
+
+[all:vars]
+ansible_python_interpreter=/usr/bin/python3

@@ -1,0 +1,77 @@
+# Environment variables and secrets
+.env
+docker/.env
+.vault_pass
+*.vault
+ansible/vars/secrets.yml
+
+# Ansible specific
+*.retry
+ansible/fact_cache/
+ansible/.ansible/
+ansible/*.log
+
+# Docker data
+data/
+docker/data/
+
+# Log files
+*.log
+logs/
+
+# Temporary files
+*.tmp
+*.bak
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv/
+
+# Database dumps and backups
+*.sql.gz
+*.dump
+*.backup
+backups/
+
+# SSL certificates and keys
+*.pem
+*.key
+*.crt
+*.cert
+*.der
+*.csr
+*.p12
+*.pfx
+
+# IDE and editor folders
+.idea/
+.vscode/
+*.sublime-*
+.project
+.pydevproject
+.settings/
+
+# Dependency directories
+node_modules/
+vendor/
+
+# Build artifacts
+dist/
+build/
+*.zip
+*.tar.gz
+
+# System specific
+.directory
+.fuse_hidden*

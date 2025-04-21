@@ -1,0 +1,31 @@
+version: '3'
+
+services:
+  master_db:
+    image: mariadb:latest
+    container_name: smtp_master_db
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MASTER_DB_ROOT_PASSWORD}
+      MYSQL_DATABASE: master_postfix
+      MYSQL_USER: ${MASTER_DB_USER}
+      MYSQL_PASSWORD: ${MASTER_DB_PASSWORD}
+    volumes:
+      - ../data/master_db:/var/lib/mysql
+      - ../sql:/docker-entrypoint-initdb.d
+    ports:
+      - "3306:3306"  # Exposing port for direct access
+
+  # Simple web interface (optional - can be added later)
+  # web:
+  #   image: nginx:alpine
+  #   container_name: smtp_master_web
+  #   restart: always
+  #   volumes:
+  #     - ../web:/usr/share/nginx/html
+  #   ports:
+  #     - "8080:80"
+
+networks:
+  default:
+    name: smtp_master_network

@@ -1,0 +1,74 @@
+---
+# Deploy SMTP Node to a server
+- name: Deploy Mail Server
+  hosts: mail_servers
+  become: yes
+  vars_files:
+    - ../vars/main.yml
+    - ../vars/secrets.yml
+  
+  tasks:
+    - name: Ensure required packages are installed
+      package:
+        name:
+          - docker
+          - docker-compose
+          - python3-docker
+          - git
+        state: present
+        
+    - name: Create required directories
+      file:
+        path: "/opt/smtp_node/{{ item }}"
+        state: directory
+        mode: '0755'
+      loop:
+        - ""
+        - "data"
+        - "data/postfix_mail"
+        - "data/postfix_ssl"
+        - "data/opendkim_keys"
+        - "data/mariadb"
+        
+    - name: Clone SMTP Node repository
+      git:
+        repo: "{{ smtp_node_repo }}"
+        dest: /tmp/smtp_node
+        version: "{{ smtp_node_version }}"
+      
+    - name: Copy files to installation directory
+      copy:
+        src: "/tmp/smtp_node/{{ item }}"
+        dest: "/opt/smtp_node/{{ item }}"
+        remote_src: yes
+      loop:
+        - "docker-compose.yml"
+        - "postfix"
+        - "sql"
+        
+    - name: Copy sync extras SQL
+      template:
+        src: ../templates/02-sync-extras.sql.j2
+        dest: /opt/smtp_node/sql/02-sync-extras.sql
+        
+    - name: Generate .env file
+      template:
+        src: ../templates/smtp_node_env.j2
+        dest: /opt/smtp_node/.env
+        
+    - name: Start mail services
+      shell: cd /opt/smtp_node && docker-compose up -d
+      args:
+        executable: /bin/bash
+        
+    - name: Update server record in master database
+      mysql_query:
+        login_db: "{{ master_db_name }}"
+        login_user: "{{ master_db_user }}"
+        login_password: "{{ master_db_password }}"
+        query: >
+          UPDATE mail_servers SET 
+          status = 'active',
+          ip_address = '{{ ansible_host }}'
+          WHERE id = {{ server_id }}
+      delegate_to: localhost

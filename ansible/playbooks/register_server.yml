@@ -1,0 +1,51 @@
+---
+# Register a new mail server in the master database
+- name: Register New Mail Server
+  hosts: localhost
+  vars_files:
+    - ../vars/main.yml
+    - ../vars/secrets.yml
+  vars:
+    new_server: "{{ hostname }}"
+    new_server_ip: "{{ ip_address }}"
+    new_server_description: "{{ description | default('Mail server') }}"
+  
+  tasks:
+    - name: Validate required variables
+      fail:
+        msg: "You must provide hostname and ip_address"
+      when: hostname is not defined or ip_address is not defined
+    
+    - name: Add server to database
+      mysql_query:
+        login_db: "{{ master_db_name }}"
+        login_user: "{{ master_db_user }}"
+        login_password: "{{ master_db_password }}"
+        query: >
+          INSERT INTO mail_servers (hostname, ip_address, description, status)
+          VALUES ('{{ new_server }}', '{{ new_server_ip }}', 
+                 '{{ new_server_description }}', 'registered')
+          ON DUPLICATE KEY UPDATE 
+            ip_address = VALUES(ip_address),
+            description = VALUES(description)
+      register: db_result
+      
+    - name: Get server ID
+      mysql_query:
+        login_db: "{{ master_db_name }}"
+        login_user: "{{ master_db_user }}"
+        login_password: "{{ master_db_password }}"
+        query: >
+          SELECT id FROM mail_servers WHERE hostname = '{{ new_server }}'
+      register: server_query
+      
+    - name: Show server information
+      debug:
+        msg: |
+          Server registered:
+          Hostname: {{ new_server }}
+          IP: {{ new_server_ip }}
+          ID: {{ server_query.query_result[0].id }}
+          
+          Add to your inventory:
+          {{ new_server }} ansible_host={{ new_server_ip }} server_id={{ server_query.query_result[0].id }}

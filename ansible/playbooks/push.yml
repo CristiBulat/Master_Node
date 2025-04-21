@@ -1,0 +1,64 @@
+---
+# Push changes from master to slave servers
+- name: Push Changes to Mail Servers
+  hosts: mail_servers
+  become: yes
+  vars_files:
+    - ../vars/main.yml
+    - ../vars/secrets.yml
+  
+  tasks:
+    - name: Get pending changes for this server
+      mysql_query:
+        login_db: "{{ master_db_name }}"
+        login_user: "{{ master_db_user }}"
+        login_password: "{{ master_db_password }}"
+        query: >
+          SELECT id, sql_statement 
+          FROM master_changes 
+          WHERE server_id = {{ server_id }} 
+          AND applied = 0
+          ORDER BY change_time ASC
+      register: pending_changes
+      delegate_to: localhost
+      
+    - name: Generate SQL file for changes
+      copy:
+        content: |
+          -- Generated changes from master
+          {% for row in pending_changes.query_result %}
+          {{ row.sql_statement }}
+          {% endfor %}
+        dest: "/tmp/apply_changes_{{ inventory_hostname }}.sql"
+      when: pending_changes.query_result | length > 0
+      delegate_to: localhost
+      
+    - name: Copy SQL to remote server
+      copy:
+        src: "/tmp/apply_changes_{{ inventory_hostname }}.sql"
+        dest: "/tmp/apply_changes.sql"
+        mode: '0640'
+      when: pending_changes.query_result | length > 0
+      
+    - name: Apply changes to slave database
+      shell: >
+        docker exec -i $(docker ps -qf "name=mariadb") mysql
+        --user=root 
+        --password={{ vault_db_root_password }}
+        postfix < /tmp/apply_changes.sql
+      args:
+        executable: /bin/bash
+      when: pending_changes.query_result | length > 0
+      
+    - name: Mark changes as applied
+      mysql_query:
+        login_db: "{{ master_db_name }}"
+        login_user: "{{ master_db_user }}"
+        login_password: "{{ master_db_password }}"
+        query: >
+          UPDATE master_changes 
+          SET applied = 1, apply_time = NOW() 
+          WHERE server_id = {{ server_id }} 
+          AND applied = 0
+      when: pending_changes.query_result | length > 0
+      delegate_to: localhost
