@@ -60,14 +60,15 @@ CREATE TABLE IF NOT EXISTS `master_dkim_keys` (
   `id` int(11) NOT NULL AUTO_INCREMENT,
   `server_id` int(11) NOT NULL,
   `origin_id` int(11) NOT NULL,
-  `domain` varchar(255) NOT NULL,
+  `domain_id` int(11) NOT NULL,  -- Using domain_id instead of domain VARCHAR
   `selector` varchar(63) NOT NULL,
   `private_key` text NOT NULL,
   `public_key` text NOT NULL, 
   `dns_record` text NOT NULL,
   PRIMARY KEY (`id`),
-  UNIQUE KEY `server_domain_selector` (`server_id`, `domain`, `selector`),
-  FOREIGN KEY (`server_id`) REFERENCES `mail_servers`(`id`) ON DELETE CASCADE
+  UNIQUE KEY `server_domain_selector` (`server_id`, `domain_id`, `selector`),
+  FOREIGN KEY (`server_id`) REFERENCES `mail_servers`(`id`) ON DELETE CASCADE,
+  FOREIGN KEY (`domain_id`) REFERENCES `master_virtual_domains`(`id`) ON DELETE CASCADE
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- Change tracking table
@@ -116,3 +117,15 @@ SELECT
 FROM master_virtual_aliases ma
 JOIN master_virtual_domains md ON ma.domain_id = md.id
 JOIN mail_servers s ON ma.server_id = s.id;
+
+-- Create view for DKIM keys
+CREATE OR REPLACE VIEW view_all_dkim_keys AS
+SELECT 
+  dk.id, 
+  s.hostname AS server, 
+  md.name AS domain,
+  dk.selector,
+  dk.dns_record
+FROM master_dkim_keys dk
+JOIN master_virtual_domains md ON dk.domain_id = md.id
+JOIN mail_servers s ON dk.server_id = s.id;

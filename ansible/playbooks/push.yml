@@ -1,4 +1,3 @@
----
 # Push changes from master to slave servers
 - name: Push Changes to Mail Servers
   hosts: mail_servers
@@ -6,7 +5,11 @@
   vars_files:
     - ../vars/main.yml
     - ../vars/secrets.yml
-  
+  vars:
+    server_ids:
+      smtp1: 1
+      smtp2: 2
+
   tasks:
     - name: Get pending changes for this server
       mysql_query:
@@ -14,51 +17,74 @@
         login_user: "{{ master_db_user }}"
         login_password: "{{ master_db_password }}"
         query: >
-          SELECT id, sql_statement 
-          FROM master_changes 
-          WHERE server_id = {{ server_id }} 
+          SELECT id, sql_statement
+          FROM master_changes
+          WHERE server_id = {{ server_ids[inventory_hostname] }}
           AND applied = 0
           ORDER BY change_time ASC
       register: pending_changes
       delegate_to: localhost
-      
+    
+    - name: Check if changes exist
+      set_fact:
+        has_changes: "{{ pending_changes.query_result[0] | length > 0 }}"
+    
+    - name: Debug pending changes count
+      debug:
+        msg: "Found {{ pending_changes.query_result[0] | length }} pending changes for {{ inventory_hostname }}"
+
     - name: Generate SQL file for changes
       copy:
         content: |
           -- Generated changes from master
-          {% for row in pending_changes.query_result %}
-          {{ row.sql_statement }}
+          {% for change in pending_changes.query_result[0] %}
+          {{ change.sql_statement }}
           {% endfor %}
         dest: "/tmp/apply_changes_{{ inventory_hostname }}.sql"
-      when: pending_changes.query_result | length > 0
+      when: has_changes
       delegate_to: localhost
-      
+
     - name: Copy SQL to remote server
       copy:
         src: "/tmp/apply_changes_{{ inventory_hostname }}.sql"
         dest: "/tmp/apply_changes.sql"
         mode: '0640'
-      when: pending_changes.query_result | length > 0
-      
+      when: has_changes
+
     - name: Apply changes to slave database
       shell: >
-        docker exec -i $(docker ps -qf "name=mariadb") mysql
-        --user=root 
-        --password={{ vault_db_root_password }}
+        docker exec -i $(docker ps -qf "name=mariadb") mariadb
+        --user=root
+        --password={{ vault_slave_db_root_password }}
         postfix < /tmp/apply_changes.sql
       args:
         executable: /bin/bash
-      when: pending_changes.query_result | length > 0
-      
+      when: has_changes
+      register: apply_result
+
+    - name: Display apply result
+      debug:
+        var: apply_result
+      when: has_changes
+
     - name: Mark changes as applied
       mysql_query:
         login_db: "{{ master_db_name }}"
         login_user: "{{ master_db_user }}"
         login_password: "{{ master_db_password }}"
         query: >
-          UPDATE master_changes 
-          SET applied = 1, apply_time = NOW() 
-          WHERE server_id = {{ server_id }} 
+          UPDATE master_changes
+          SET applied = 1, apply_time = NOW()
+          WHERE server_id = {{ server_ids[inventory_hostname] }}
           AND applied = 0
-      when: pending_changes.query_result | length > 0
+      when: has_changes
       delegate_to: localhost
+
+    - name: Clean up SQL files
+      file:
+        path: "{{ item }}"
+        state: absent
+      with_items:
+        - "/tmp/apply_changes_{{ inventory_hostname }}.sql"
+        - "/tmp/apply_changes.sql"
+      when: has_changes

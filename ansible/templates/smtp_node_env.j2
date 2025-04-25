@@ -5,10 +5,10 @@
 HOSTNAME={{ inventory_hostname }}
 
 # Primary domain for postfix
-PRIMARY_DOMAIN={{ primary_domain | default(inventory_hostname.split('.', 1)[1]) }}
+PRIMARY_DOMAIN={{ domains.split(',')[0] if domains is defined else inventory_hostname.split('.', 1)[1] }}
 
 # All domains to handle, comma-separated
-DOMAINS={{ domains | default(primary_domain | default(inventory_hostname.split('.', 1)[1])) }}
+DOMAINS={{ domains | default(PRIMARY_DOMAIN) }}
 
 # Networks allowed to relay mail
 ADDITIONAL_NETWORKS={{ additional_networks | default('0.0.0.0/0') }}

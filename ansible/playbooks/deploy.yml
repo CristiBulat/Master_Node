@@ -8,10 +8,15 @@
     - ../vars/secrets.yml
   
   tasks:
+    - name: Check required variables
+      fail:
+        msg: "You must provide domains variable for {{ inventory_hostname }}"
+      when: domains is not defined
+
     - name: Ensure required packages are installed
       package:
         name:
-          - docker
+          - docker.io
           - docker-compose
           - python3-docker
           - git
@@ -33,12 +38,12 @@
     - name: Clone SMTP Node repository
       git:
         repo: "{{ smtp_node_repo }}"
-        dest: /tmp/smtp_node
+        dest: /home/ubuntu/smtp_node
         version: "{{ smtp_node_version }}"
       
     - name: Copy files to installation directory
       copy:
-        src: "/tmp/smtp_node/{{ item }}"
+        src: "/home/ubuntu/smtp_node/{{ item }}"
         dest: "/opt/smtp_node/{{ item }}"
         remote_src: yes
       loop:

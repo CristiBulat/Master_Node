@@ -3,8 +3,8 @@
 # Database connection details
 master_db_host: localhost
 master_db_name: master_postfix
-master_db_user: "{{ lookup('env', 'MASTER_DB_USER') }}"
-master_db_password: "{{ lookup('env', 'MASTER_DB_PASSWORD') }}"
+master_db_user: "{{ master_db_user }}"
+master_db_password: "{{ vault_db_root_password }}"
 
 # Slave database connection details
 slave_db_user: mail_sync
@@ -12,7 +12,7 @@ slave_db_password: "{{ vault_slave_db_password }}"
 
 # SMTP Node repository
 smtp_node_repo: https://github.com/CristiBulat/SMTP_Node.git
-smtp_node_version: master
+smtp_node_version: main
 
 # Default SMTP configuration
 default_message_size_limit: 52428800

@@ -39,13 +39,16 @@
           SELECT id FROM mail_servers WHERE hostname = '{{ new_server }}'
       register: server_query
       
+    - name: Debug query result
+      debug:
+        var: server_query
+
     - name: Show server information
       debug:
         msg: |
           Server registered:
           Hostname: {{ new_server }}
           IP: {{ new_server_ip }}
-          ID: {{ server_query.query_result[0].id }}
-          
+          ID: {{ server_query.query_result[0][0] }}
           Add to your inventory:
-          {{ new_server }} ansible_host={{ new_server_ip }} server_id={{ server_query.query_result[0].id }}
+          {{ new_server }} ansible_host={{ new_server_ip }} server_id={{ server_query.query_result[0][0] }}

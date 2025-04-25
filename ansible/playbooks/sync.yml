@@ -1,4 +1,3 @@
----
 # Sync databases from slave servers to master
 - name: Synchronize Mail Server Databases
   hosts: mail_servers
@@ -6,117 +5,358 @@
   vars_files:
     - ../vars/main.yml
     - ../vars/secrets.yml
-  
-  tasks:
-    - name: Create temp directory for sync
-      file:
-        path: "/tmp/db_sync_{{ inventory_hostname }}"
-        state: directory
-        mode: '0750'
-      delegate_to: localhost
-      run_once: yes
+  vars:
+    server_ids:
+      smtp1: 1
+      smtp2: 2
 
-    - name: Export data from slave database
+  tasks:
+    # --------------------------------------------------------------
+    # Create Temporary Tables on Master (with explicit schema)
+    # --------------------------------------------------------------
+    - name: Create temporary tables on master (explicit schema)
+      mysql_query:
+        login_db: "{{ master_db_name }}" # mysql_query supports login_db
+        login_user: "{{ master_db_user }}"
+        login_password: "{{ master_db_password }}"
+        query: "{{ item }}"
+      delegate_to: localhost
+      with_items:
+        # Domains
+        - "DROP TABLE IF EXISTS temp_virtual_domains_{{ inventory_hostname }}"
+        - >
+          CREATE TABLE temp_virtual_domains_{{ inventory_hostname }} (
+            id INT NOT NULL PRIMARY KEY,
+            name VARCHAR(255) NOT NULL
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        # Users
+        - "DROP TABLE IF EXISTS temp_virtual_users_{{ inventory_hostname }}"
+        - >
+          CREATE TABLE temp_virtual_users_{{ inventory_hostname }} (
+            id INT NOT NULL PRIMARY KEY,
+            domain_id INT NOT NULL,
+            email VARCHAR(255) NOT NULL,
+            password VARCHAR(255) NOT NULL,
+            created DATETIME,
+            modified DATETIME,
+            active TINYINT(1) DEFAULT 1
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        # Aliases
+        - "DROP TABLE IF EXISTS temp_virtual_aliases_{{ inventory_hostname }}"
+        - >
+          CREATE TABLE temp_virtual_aliases_{{ inventory_hostname }} (
+            id INT NOT NULL PRIMARY KEY,
+            domain_id INT NOT NULL,
+            source VARCHAR(100) NOT NULL,
+            destination VARCHAR(100) NOT NULL
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        # DKIM Keys
+        - "DROP TABLE IF EXISTS temp_dkim_keys_{{ inventory_hostname }}"
+        - >
+          CREATE TABLE temp_dkim_keys_{{ inventory_hostname }} (
+            id INT NOT NULL PRIMARY KEY,
+            domain_id INT NOT NULL,
+            selector VARCHAR(63) NOT NULL,
+            private_key TEXT NOT NULL,
+            public_key TEXT NOT NULL
+          ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+
+    # --------------------------------------------------------------
+    # Check Slave Structures (Optional but good for debugging)
+    # --------------------------------------------------------------
+    # ... (debug tasks remain the same) ...
+    - name: Check slave virtual_aliases table structure
       shell: >
-        docker exec -i $(docker ps -qf "name=mariadb") mysqldump 
-        --user={{ slave_db_user }} 
-        --password={{ vault_slave_db_password }} 
-        --no-create-info
-        --complete-insert
-        postfix virtual_domains virtual_users virtual_aliases dkim_keys
-        > /tmp/db_export.sql
+        docker exec -i $(docker ps -qf "name=mariadb") mariadb
+        --user={{ slave_db_user }}
+        --password={{ vault_slave_db_password }}
+        -e "DESCRIBE postfix.virtual_aliases"
+      register: slave_aliases_structure
+      changed_when: false
+
+    - name: Display slave aliases table structure
+      debug:
+        var: slave_aliases_structure.stdout_lines
+
+    - name: Check if DKIM keys table exists on slave
+      shell: >
+        docker exec -i $(docker ps -qf "name=mariadb") mariadb
+        --user={{ slave_db_user }}
+        --password={{ vault_slave_db_password }}
+        -e "SHOW TABLES FROM postfix LIKE 'dkim_keys'"
+      register: dkim_table_exists
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Check DKIM table structure if it exists on slave
+      shell: >
+        docker exec -i $(docker ps -qf "name=mariadb") mariadb
+        --user={{ slave_db_user }}
+        --password={{ vault_slave_db_password }}
+        -e "DESCRIBE postfix.dkim_keys"
+      register: dkim_structure
+      when: dkim_table_exists.stdout | default('') != ""
+      ignore_errors: yes
+      changed_when: false
+
+    - name: Display DKIM table structure
+      debug:
+        var: dkim_structure.stdout_lines
+      when: dkim_table_exists.stdout | default('') != ""
+
+    # --------------------------------------------------------------
+    # Extract Data from Slaves into SQL Files
+    # --------------------------------------------------------------
+    # ... (transfer tasks remain the same) ...
+    - name: Transfer domains data directly
+      shell: >
+        docker exec -i $(docker ps -qf "name=mariadb") mariadb
+        --user={{ slave_db_user }}
+        --password={{ vault_slave_db_password }}
+        --skip-column-names --raw
+        -e "SELECT CONCAT('INSERT INTO temp_virtual_domains_{{ inventory_hostname }} (id, name) VALUES (', id, ', ''', REPLACE(name, '\\'', ''''''), ''');')
+            FROM postfix.virtual_domains" > /tmp/domains_insert.sql
       args:
         executable: /bin/bash
-      register: export_result
 
-    - name: Fetch exported data
+    - name: Transfer users data directly
+      shell: >
+        docker exec -i $(docker ps -qf "name=mariadb") mariadb
+        --user={{ slave_db_user }}
+        --password={{ vault_slave_db_password }}
+        --skip-column-names --raw
+        -e "SELECT CONCAT('INSERT INTO temp_virtual_users_{{ inventory_hostname }} (id, domain_id, email, password, created, modified, active) VALUES (',
+            id, ', ', domain_id, ', ''', REPLACE(email, '\\'', ''''''), ''', ''', REPLACE(password, '\\'', ''''''), ''', ''',
+            IFNULL(created, NOW()), ''', ''', IFNULL(modified, NOW()), ''', ', IFNULL(active, 1), ');')
+            FROM postfix.virtual_users" > /tmp/users_insert.sql
+      args:
+        executable: /bin/bash
+
+    - name: Transfer aliases data directly
+      shell: >
+        docker exec -i $(docker ps -qf "name=mariadb") mariadb
+        --user={{ slave_db_user }}
+        --password={{ vault_slave_db_password }}
+        --skip-column-names --raw
+        -e "SELECT CONCAT('INSERT INTO temp_virtual_aliases_{{ inventory_hostname }} (id, domain_id, source, destination) VALUES (',
+            id, ', ', domain_id, ', ''', REPLACE(source, '\\'', ''''''), ''', ''', REPLACE(destination, '\\'', ''''''), ''');')
+            FROM postfix.virtual_aliases" > /tmp/aliases_insert.sql
+      args:
+        executable: /bin/bash
+
+    - name: Transfer DKIM keys data if table exists
+      shell: >
+        docker exec -i $(docker ps -qf "name=mariadb") mariadb
+        --user={{ slave_db_user }}
+        --password={{ vault_slave_db_password }}
+        --skip-column-names --raw
+        -e "SELECT CONCAT('INSERT INTO temp_dkim_keys_{{ inventory_hostname }} (id, domain_id, selector, private_key, public_key) VALUES (',
+            k.id, ', ', d.id, ', ''', REPLACE(k.selector, '\\'', ''''''), ''', ''',
+            REPLACE(k.private_key, '\\'', ''''''), ''', ''', REPLACE(k.public_key, '\\'', ''''''), ''');')
+            FROM postfix.dkim_keys k JOIN postfix.virtual_domains d ON k.domain = d.name" > /tmp/dkim_insert.sql
+      args:
+        executable: /bin/bash
+      when: dkim_table_exists.stdout | default('') != ""
+      ignore_errors: yes
+
+    # --------------------------------------------------------------
+    # Fetch SQL Files to Master/Controller
+    # --------------------------------------------------------------
+    - name: Fetch SQL insert files
       fetch:
-        src: /tmp/db_export.sql
-        dest: "/tmp/db_sync_{{ inventory_hostname }}/db_export.sql"
+        src: "/tmp/{{ item }}_insert.sql"
+        dest: "/tmp/db_sync_{{ inventory_hostname }}/{{ item }}_insert.sql"
         flat: yes
+      with_items:
+        - domains
+        - users
+        - aliases
+        - dkim
+      ignore_errors: yes # Keep ignoring fetch errors for now
 
-    - name: Create temporary tables on master
-      mysql_query:
-        login_db: "{{ master_db_name }}"
-        login_user: "{{ master_db_user }}"
-        login_password: "{{ master_db_password }}"
-        query: |
-          DROP TABLE IF EXISTS temp_virtual_domains;
-          DROP TABLE IF EXISTS temp_virtual_users;
-          DROP TABLE IF EXISTS temp_virtual_aliases;
-          DROP TABLE IF EXISTS temp_dkim_keys;
-          
-          CREATE TABLE temp_virtual_domains LIKE virtual_domains;
-          CREATE TABLE temp_virtual_users LIKE virtual_users;
-          CREATE TABLE temp_virtual_aliases LIKE virtual_aliases;
-          CREATE TABLE temp_dkim_keys LIKE dkim_keys;
-      delegate_to: localhost
-
-    - name: Import data to temporary tables
+    # --------------------------------------------------------------
+    # Import Data into Temporary Tables on Master using mysql_db
+    # --------------------------------------------------------------
+    - name: Import domains data
       mysql_db:
-        state: import
-        name: "{{ master_db_name }}"
-        target: "/tmp/db_sync_{{ inventory_hostname }}/db_export.sql"
-        login_host: localhost
+        name: "{{ master_db_name }}"         # Use 'name' for database
         login_user: "{{ master_db_user }}"
         login_password: "{{ master_db_password }}"
+        state: import
+        target: "/tmp/db_sync_{{ inventory_hostname }}/domains_insert.sql"
+      delegate_to: localhost
+      ignore_errors: yes
+
+    - name: Import users data
+      mysql_db:
+        name: "{{ master_db_name }}"         # Use 'name' for database
+        login_user: "{{ master_db_user }}"
+        login_password: "{{ master_db_password }}"
+        state: import
+        target: "/tmp/db_sync_{{ inventory_hostname }}/users_insert.sql"
+      delegate_to: localhost
+      ignore_errors: yes
+
+    - name: Import aliases data
+      mysql_db:
+        name: "{{ master_db_name }}"         # Use 'name' for database
+        login_user: "{{ master_db_user }}"
+        login_password: "{{ master_db_password }}"
+        state: import
+        target: "/tmp/db_sync_{{ inventory_hostname }}/aliases_insert.sql"
+      delegate_to: localhost
+      ignore_errors: yes
+
+    - name: Import DKIM keys data
+      mysql_db:
+        name: "{{ master_db_name }}"         # Use 'name' for database
+        login_user: "{{ master_db_user }}"
+        login_password: "{{ master_db_password }}"
+        state: import
+        target: "/tmp/db_sync_{{ inventory_hostname }}/dkim_insert.sql"
+      delegate_to: localhost
+      ignore_errors: yes
+
+    # --------------------------------------------------------------
+    # Merge Data from Temporary Tables into Master Tables
+    # --------------------------------------------------------------
+    - name: Debug server_id value
+      debug:
+        msg: "Setting server_id for {{ inventory_hostname }} to {{ server_ids[inventory_hostname] }}"
+
+    - name: Import domains to master table
+      mysql_query:
+        login_db: "{{ master_db_name }}" # mysql_query supports login_db
+        login_user: "{{ master_db_user }}"
+        login_password: "{{ master_db_password }}"
+        query: >
+          INSERT INTO master_virtual_domains (server_id, origin_id, name)
+          SELECT {{ server_ids[inventory_hostname] }}, id, name
+          FROM temp_virtual_domains_{{ inventory_hostname }}
+          ON DUPLICATE KEY UPDATE name = VALUES(name);
       delegate_to: localhost
 
-    - name: Transform and import data to master tables
+    - name: Import users to master table
       mysql_query:
         login_db: "{{ master_db_name }}"
         login_user: "{{ master_db_user }}"
         login_password: "{{ master_db_password }}"
-        query: |
-          -- Set server ID variable
-          SET @server_id = {{ server_id }};
-          
-          -- Import domains
-          INSERT INTO master_virtual_domains (server_id, origin_id, name)
-          SELECT @server_id, id, name FROM temp_virtual_domains
-          ON DUPLICATE KEY UPDATE name = VALUES(name);
-          
-          -- Import users (with correct domain_id references)
-          INSERT INTO master_virtual_users 
+        query: >
+          INSERT INTO master_virtual_users
             (server_id, origin_id, domain_id, email, password, created, modified, active)
-          SELECT 
-            @server_id, 
-            u.id, 
+          SELECT
+            {{ server_ids[inventory_hostname] }},
+            u.id,
             md.id,
-            u.email, 
-            u.password, 
-            u.created, 
-            u.modified, 
+            u.email,
+            u.password,
+            u.created,
+            u.modified,
             u.active
-          FROM temp_virtual_users u
-          JOIN temp_virtual_domains d ON u.domain_id = d.id
-          JOIN master_virtual_domains md ON md.origin_id = d.id AND md.server_id = @server_id
-          ON DUPLICATE KEY UPDATE 
+          FROM temp_virtual_users_{{ inventory_hostname }} u
+          JOIN temp_virtual_domains_{{ inventory_hostname }} d ON u.domain_id = d.id
+          JOIN master_virtual_domains md ON md.origin_id = d.id AND md.server_id = {{ server_ids[inventory_hostname] }}
+          ON DUPLICATE KEY UPDATE
             password = VALUES(password),
             modified = VALUES(modified),
             active = VALUES(active);
-          
-          -- Similar process for aliases and DKIM keys (omitted for brevity)
       delegate_to: localhost
 
-    - name: Update sync timestamp
+    - name: Import aliases to master table
+      mysql_query:
+        login_db: "{{ master_db_name }}"
+        login_user: "{{ master_db_user }}"
+        login_password: "{{ master_db_password }}"
+        query: >
+          INSERT INTO master_virtual_aliases
+            (server_id, origin_id, domain_id, source, destination)
+          SELECT
+            {{ server_ids[inventory_hostname] }},
+            a.id,
+            md.id,
+            a.source,
+            a.destination
+          FROM temp_virtual_aliases_{{ inventory_hostname }} a
+          JOIN temp_virtual_domains_{{ inventory_hostname }} d ON a.domain_id = d.id
+          JOIN master_virtual_domains md ON md.origin_id = d.id AND md.server_id = {{ server_ids[inventory_hostname] }}
+          ON DUPLICATE KEY UPDATE
+            destination = VALUES(destination);
+      delegate_to: localhost
+
+    # --------------------------------------------------------------
+    # !!! ACTION REQUIRED !!!
+    # Before running, ensure the 'master_dkim_keys' table in the
+    # '{{ master_db_name }}' database on localhost HAS a column
+    # named 'domain_id' (likely INT). If not, add it using ALTER TABLE.
+    # Example: ALTER TABLE master_dkim_keys ADD COLUMN domain_id INT;
+    # --------------------------------------------------------------
+    - name: Import DKIM keys to master table
+      mysql_query:
+        login_db: "{{ master_db_name }}"
+        login_user: "{{ master_db_user }}"
+        login_password: "{{ master_db_password }}"
+        query: >
+          INSERT INTO master_dkim_keys
+            (server_id, origin_id, domain_id, selector, private_key, public_key, dns_record)
+          SELECT
+            {{ server_ids[inventory_hostname] }},
+            k.id,
+            md.id,
+            k.selector,
+            k.private_key,
+            k.public_key,
+            CONCAT(k.selector, '._domainkey.', d.name, '. IN TXT "v=DKIM1; k=rsa; p=', k.public_key, '"')
+          FROM temp_dkim_keys_{{ inventory_hostname }} k
+          JOIN temp_virtual_domains_{{ inventory_hostname }} d ON k.domain_id = d.id
+          JOIN master_virtual_domains md ON md.origin_id = d.id AND md.server_id = {{ server_ids[inventory_hostname] }}
+          ON DUPLICATE KEY UPDATE
+            selector = VALUES(selector),
+            private_key = VALUES(private_key),
+            public_key = VALUES(public_key),
+            dns_record = VALUES(dns_record);
+      delegate_to: localhost
+      ignore_errors: yes
+
+    # --------------------------------------------------------------
+    # Final Steps & Cleanup
+    # --------------------------------------------------------------
+    # ... (cleanup tasks remain the same) ...
+    - name: Update sync timestamp in master table (assuming table exists)
       mysql_query:
         login_db: "{{ master_db_name }}"
         login_user: "{{ master_db_user }}"
         login_password: "{{ master_db_password }}"
         query: >
           UPDATE mail_servers SET last_sync = NOW()
-          WHERE id = {{ server_id }}
+          WHERE id = {{ server_ids[inventory_hostname] }}
       delegate_to: localhost
+      ignore_errors: yes
 
-    - name: Clean up temporary tables
+    - name: Clean up temporary tables on master
       mysql_query:
         login_db: "{{ master_db_name }}"
         login_user: "{{ master_db_user }}"
         login_password: "{{ master_db_password }}"
-        query: |
-          DROP TABLE IF EXISTS temp_virtual_domains;
-          DROP TABLE IF EXISTS temp_virtual_users;
-          DROP TABLE IF EXISTS temp_virtual_aliases;
-          DROP TABLE IF EXISTS temp_dkim_keys;
+        query: "{{ item }}"
       delegate_to: localhost
+      with_items:
+        - "DROP TABLE IF EXISTS temp_virtual_domains_{{ inventory_hostname }}"
+        - "DROP TABLE IF EXISTS temp_virtual_users_{{ inventory_hostname }}"
+        - "DROP TABLE IF EXISTS temp_virtual_aliases_{{ inventory_hostname }}"
+        - "DROP TABLE IF EXISTS temp_dkim_keys_{{ inventory_hostname }}"
+
+    - name: Clean up fetched SQL files on master
+      file:
+        path: "/tmp/db_sync_{{ inventory_hostname }}"
+        state: absent
+      delegate_to: localhost
+
+    - name: Clean up SQL files on slaves
+      file:
+        path: "/tmp/{{ item }}_insert.sql"
+        state: absent
+      with_items:
+        - domains
+        - users
+        - aliases
+        - dkim
